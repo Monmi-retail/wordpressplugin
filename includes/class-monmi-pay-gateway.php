@@ -153,13 +153,16 @@ class Monmi_Pay_Gateway extends WC_Payment_Gateway {
         $code   = isset( $_POST['monmi_payment_code'] ) ? sanitize_text_field( wp_unslash( $_POST['monmi_payment_code'] ) ) : '';
         $payload_raw = isset( $_POST['monmi_payment_payload'] ) ? wp_unslash( $_POST['monmi_payment_payload'] ) : '';
 
-        if ( 'success' !== $status || ! $token ) {
+        if ( ! $token ) {
             wc_add_notice( __( 'Unable to finalise Monmi payment. Please try again.', 'monmi-pay' ), 'error' );
             return;
         }
 
-        $order->update_meta_data( '_monmi_payment_status', $status );
         $order->update_meta_data( '_monmi_payment_token', $token );
+
+        if ( $status ) {
+            $order->update_meta_data( '_monmi_payment_status', $status );
+        }
 
         if ( $code ) {
             $order->update_meta_data( '_monmi_payment_code', $code );
@@ -181,15 +184,20 @@ class Monmi_Pay_Gateway extends WC_Payment_Gateway {
             }
         }
 
-        $order->payment_complete();
-        $order->add_order_note( __( 'Payment authorised via Monmi Pay.', 'monmi-pay' ) );
-
         if ( function_exists( 'WC' ) && WC()->cart ) {
             WC()->cart->empty_cart();
         }
 
+        $order->update_status( 'on-hold', __( 'Awaiting Monmi webhook confirmation.', 'monmi-pay' ) );
+
+        if ( 'success' === $status ) {
+            $order->add_order_note( __( 'Monmi authorised payment at checkout. Awaiting webhook confirmation.', 'monmi-pay' ) );
+        } else {
+            $order->add_order_note( __( 'Monmi payment initiated. Awaiting webhook confirmation.', 'monmi-pay' ) );
+        }
+
         return [
-            'result'   => 'success',
+            'redirect' => apply_filters( 'monmi_pay_checkout_redirect', ->get_return_url(  ),  ),
             'redirect' => $this->get_return_url( $order ),
         ];
     }

@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Monmi Pay
  * Description: Provides a Monmi Pay payment gateway and settings for WooCommerce.
- * Version: 0.1.0
+ * Version: 0.1.2
  * Author: Monmi
  */
 
@@ -27,7 +27,7 @@ final class Monmi_Pay_Plugin {
     const OPTION_API_KEY     = 'monmi_pay_api_key';
     const OPTION_SECRET      = 'monmi_pay_secret_key';
     const OPTION_ENVIRONMENT = 'monmi_pay_environment';
-    const VERSION            = '0.1.0';
+    const VERSION            = '0.1.1';
 
     /** @var Monmi_Pay_Plugin|null */
     private static $instance = null;
@@ -176,6 +176,11 @@ final class Monmi_Pay_Plugin {
                 submit_button();
                 ?>
             </form>
+            <div class="monmi-pay-settings__webhook">
+                <h2><?php esc_html_e( 'Webhook Endpoint', 'monmi-pay' ); ?></h2>
+                <p><?php esc_html_e( 'Use this URL in the Monmi merchant dashboard to receive payment status updates.', 'monmi-pay' ); ?></p>
+                <code><?php echo esc_html( rest_url( 'monmi-pay/v1/webhook' ) ); ?></code>
+            </div>
             <?php $this->render_payment_methods_overview(); ?>
         </div>
         <?php
@@ -345,24 +350,26 @@ final class Monmi_Pay_Plugin {
      * Register REST API routes.
      */
     public function register_rest_routes(): void {
-        $routes = [
+        register_rest_route(
+            'monmi-pay/v1',
             '/create-payment',
-            '/create-intent',
-        ];
+            [
+                'methods'             => 'POST',
+                'callback'            => [ $this, 'rest_create_payment' ],
+                'permission_callback' => '__return_true',
+            ]
+        );
 
-        foreach ( $routes as $route ) {
-            register_rest_route(
-                'monmi-pay/v1',
-                $route,
-                [
-                    'methods'             => 'POST',
-                    'callback'            => [ , 'rest_create_payment' ],
-                    'permission_callback' => '__return_true',
-                ]
-            );
-        }
+        register_rest_route(
+            'monmi-pay/v1',
+            '/webhook',
+            [
+                'methods'             => 'POST',
+                'callback'            => [ $this, 'rest_webhook' ],
+                'permission_callback' => '__return_true',
+            ]
+        );
     }
-
 
     /**
      * Handle create payment REST request.
@@ -425,8 +432,67 @@ final class Monmi_Pay_Plugin {
             [
                 'token'   => $token,
                 'payment' => $data,
-                'status'  => ,
+                'status'  => $status,
                 'message' => $body['message'] ?? '',
+            ]
+        );
+    }
+
+    public function rest_webhook( WP_REST_Request $request ) {
+        $signature  = $request->get_header( 'x-api-signature' );
+        $request_id = $request->get_header( 'x-request-id' );
+        $timestamp  = $request->get_header( 'x-timestamp' );
+
+        if ( ! $signature || ! $request_id || ! $timestamp ) {
+            return new WP_Error( 'monmi_webhook_missing_headers', __( 'Webhook headers missing required authentication values.', 'monmi-pay' ), [ 'status' => 401 ] );
+        }
+
+        $secret = get_option( self::OPTION_SECRET, '' );
+        if ( empty( $secret ) ) {
+            return new WP_Error( 'monmi_webhook_secret_missing', __( 'Monmi secret key not configured.', 'monmi-pay' ), [ 'status' => 500 ] );
+        }
+
+        $expected = $this->generate_signature( $secret, $request_id, $timestamp );
+        if ( ! hash_equals( $expected, $signature ) ) {
+            return new WP_Error( 'monmi_webhook_invalid_signature', __( 'Webhook signature verification failed.', 'monmi-pay' ), [ 'status' => 401 ] );
+        }
+
+        $payload = $request->get_json_params();
+        if ( empty( $payload ) || ! is_array( $payload ) ) {
+            return new WP_Error( 'monmi_webhook_empty_payload', __( 'Webhook payload is empty or invalid.', 'monmi-pay' ), [ 'status' => 400 ] );
+        }
+
+        $order = $this->find_order_from_webhook( $payload );
+        if ( is_wp_error( $order ) ) {
+            return $order;
+        }
+
+        $status = isset( $payload['status'] ) ? sanitize_text_field( (string) $payload['status'] ) : '';
+        $token  = isset( $payload['token'] ) ? sanitize_text_field( (string) $payload['token'] ) : '';
+        $code   = isset( $payload['code'] ) ? sanitize_text_field( (string) $payload['code'] ) : '';
+
+        if ( $status ) {
+            $order->update_meta_data( '_monmi_gateway_status', $status );
+        }
+
+        if ( $token && $order->get_meta( '_monmi_payment_token' ) !== $token ) {
+            $order->update_meta_data( '_monmi_payment_token', $token );
+        }
+
+        if ( $code && $order->get_meta( '_monmi_payment_code' ) !== $code ) {
+            $order->update_meta_data( '_monmi_payment_code', $code );
+        }
+
+        $order->update_meta_data( '_monmi_webhook_payload', wp_json_encode( $payload ) );
+
+        $this->maybe_update_order_status_from_webhook( $order, $status );
+
+        $order->save();
+
+        return rest_ensure_response(
+            [
+                'success' => true,
+                'status'  => $status,
             ]
         );
     }
@@ -434,12 +500,11 @@ final class Monmi_Pay_Plugin {
     /**
      * Persist checkout data into order meta.
      */
-    public function persist_checkout_meta( WC_Order $order, array $data ): void {
-        if ( ! class_exists( 'Monmi_Pay_Gateway' ) ) {
+    public function persist_checkout_meta( $order, array $data ): void {
+        if ( ! class_exists( 'WC_Order' ) || ! ( $order instanceof WC_Order ) ) {
             return;
         }
-
-        if ( empty( $data['payment_method'] ) || Monmi_Pay_Gateway::GATEWAY_ID !== $data['payment_method'] ) {
+        if ( ! class_exists( 'Monmi_Pay_Gateway' ) ) {
             return;
         }
 
@@ -514,6 +579,88 @@ final class Monmi_Pay_Plugin {
     /**
      * Build Monmi payment payload from request and cart context.
      */
+    private function find_order_from_webhook( array $payload ) {
+        if ( ! class_exists( 'WC_Order' ) ) {
+            return new WP_Error( 'monmi_webhook_unavailable', __( 'WooCommerce order class unavailable.', 'monmi-pay' ), [ 'status' => 500 ] );
+        }
+        if ( ! function_exists( 'wc_get_orders' ) ) {
+            return new WP_Error( 'monmi_webhook_unavailable', __( 'WooCommerce helpers are unavailable.', 'monmi-pay' ), [ 'status' => 500 ] );
+        }
+
+        if ( isset( $payload['order_id'] ) && is_numeric( $payload['order_id'] ) ) {
+            $order = wc_get_order( absint( $payload['order_id'] ) );
+            if ( $order instanceof WC_Order ) {
+                return $order;
+            }
+        }
+
+        $meta_map = [
+            '_monmi_payment_token'          => isset( $payload['token'] ) ? $payload['token'] : '',
+            '_monmi_payment_code'           => isset( $payload['code'] ) ? $payload['code'] : '',
+            '_monmi_partner_transaction_id' => isset( $payload['partnerTransactionId'] ) ? $payload['partnerTransactionId'] : '',
+        ];
+
+        foreach ( $meta_map as $meta_key => $meta_value ) {
+            if ( '' === $meta_value ) {
+                continue;
+            }
+
+            $orders = wc_get_orders( [
+                'limit'      => 1,
+                'meta_key'   => $meta_key,
+                'meta_value' => sanitize_text_field( (string) $meta_value ),
+            ] );
+
+            if ( ! empty( $orders ) && $orders[0] instanceof WC_Order ) {
+                return $orders[0];
+            }
+        }
+
+        return new WP_Error( 'monmi_webhook_order_not_found', __( 'Unable to locate order for Monmi webhook.', 'monmi-pay' ), [ 'status' => 404 ] );
+    }
+
+    private function maybe_update_order_status_from_webhook( WC_Order $order, string $status ): void {
+        $status = trim( strtolower( $status ) );
+        if ( '' === $status ) {
+            return;
+        }
+
+        $order->add_order_note( sprintf( __( 'Monmi webhook status: %s', 'monmi-pay' ), $status ) );
+
+        if ( $this->is_webhook_success_status( $status ) ) {
+            if ( ! $order->is_paid() ) {
+                $order->payment_complete();
+            }
+            return;
+        }
+
+        if ( $this->is_webhook_failed_status( $status ) ) {
+            if ( ! $order->has_status( 'failed' ) ) {
+                $order->update_status( 'failed', __( 'Monmi reported the payment as failed via webhook.', 'monmi-pay' ) );
+            }
+        }
+    }
+
+    private function is_webhook_success_status( string $status ): bool {
+        $success_values = [ 'success', 'succeeded', 'paid', 'completed', 'complete', 'authorised', 'authorized' ];
+        if ( in_array( $status, $success_values, true ) ) {
+            return true;
+        }
+
+        $numeric_success = [ '9', '0', '00', '200' ];
+        return in_array( $status, $numeric_success, true );
+    }
+
+    private function is_webhook_failed_status( string $status ): bool {
+        $failed_values = [ 'failed', 'declined', 'cancelled', 'canceled', 'voided', 'refused' ];
+        if ( in_array( $status, $failed_values, true ) ) {
+            return true;
+        }
+
+        $numeric_failed = [ '10', '400', '402', '500' ];
+        return in_array( $status, $numeric_failed, true );
+    }
+
     private function build_payment_payload( WP_REST_Request $request ) {
         if ( ! function_exists( 'WC' ) || ! WC()->cart ) {
             return new WP_Error( 'monmi_no_cart', __( 'WooCommerce cart not available.', 'monmi-pay' ), [ 'status' => 400 ] );
@@ -662,8 +809,7 @@ final class Monmi_Pay_Plugin {
         }
 
         $request_id = wp_generate_uuid4();
-        $timestamp  = gmdate( 'c' );
-
+        $timestamp  = (string) (int) round( microtime( true ) * 1000 );
         $headers = [
             'Content-Type'    => 'application/json',
             'x-api-key'       => $api_key,
