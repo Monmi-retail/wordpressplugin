@@ -1,0 +1,774 @@
+<?php
+/**
+ * Plugin Name: Monmi Pay
+ * Description: Provides a Monmi Pay payment gateway and settings for WooCommerce.
+ * Version: 0.1.0
+ * Author: Monmi
+ */
+
+if ( ! defined( 'ABSPATH' ) ) {
+    exit;
+}
+
+if ( ! defined( 'MONMI_PAY_PLUGIN_FILE' ) ) {
+    define( 'MONMI_PAY_PLUGIN_FILE', __FILE__ );
+}
+
+if ( ! defined( 'MONMI_PAY_PLUGIN_PATH' ) ) {
+    define( 'MONMI_PAY_PLUGIN_PATH', plugin_dir_path( MONMI_PAY_PLUGIN_FILE ) );
+}
+
+if ( ! defined( 'MONMI_PAY_PLUGIN_URL' ) ) {
+    define( 'MONMI_PAY_PLUGIN_URL', plugin_dir_url( MONMI_PAY_PLUGIN_FILE ) );
+}
+
+final class Monmi_Pay_Plugin {
+    const OPTION_GROUP       = 'monmi_pay_settings';
+    const OPTION_API_KEY     = 'monmi_pay_api_key';
+    const OPTION_SECRET      = 'monmi_pay_secret_key';
+    const OPTION_ENVIRONMENT = 'monmi_pay_environment';
+    const VERSION            = '0.1.0';
+
+    /** @var Monmi_Pay_Plugin|null */
+    private static $instance = null;
+
+    /** @var bool */
+    private $woocommerce_active = false;
+
+    /**
+     * Retrieve the singleton instance.
+     */
+    public static function instance(): Monmi_Pay_Plugin {
+        if ( null === self::$instance ) {
+            self::$instance = new self();
+        }
+
+        return self::$instance;
+    }
+
+    /**
+     * Monmi_Pay_Plugin constructor.
+     */
+    private function __construct() {
+        $this->woocommerce_active = class_exists( 'WooCommerce' );
+
+        add_action( 'admin_init', [ $this, 'register_settings' ] );
+        add_action( 'admin_menu', [ $this, 'register_settings_page' ] );
+
+        if ( ! $this->woocommerce_active ) {
+            add_action( 'admin_notices', [ $this, 'render_woocommerce_missing_notice' ] );
+            return;
+        }
+
+        $this->include_files();
+
+        add_filter( 'woocommerce_payment_gateways', [ $this, 'register_gateway' ] );
+        add_action( 'rest_api_init', [ $this, 'register_rest_routes' ] );
+        add_action( 'woocommerce_checkout_create_order', [ $this, 'persist_checkout_meta' ], 10, 2 );
+    }
+
+    /**
+     * Include plugin PHP dependencies.
+     */
+    private function include_files(): void {
+        require_once MONMI_PAY_PLUGIN_PATH . 'includes/class-monmi-pay-gateway.php';
+    }
+
+    /**
+     * Register plugin settings.
+     */
+    public function register_settings(): void {
+        register_setting(
+            self::OPTION_GROUP,
+            self::OPTION_API_KEY,
+            [
+                'type'              => 'string',
+                'sanitize_callback' => 'sanitize_text_field',
+            ]
+        );
+
+        register_setting(
+            self::OPTION_GROUP,
+            self::OPTION_SECRET,
+            [
+                'type'              => 'string',
+                'sanitize_callback' => 'sanitize_text_field',
+            ]
+        );
+
+        register_setting(
+            self::OPTION_GROUP,
+            self::OPTION_ENVIRONMENT,
+            [
+                'type'              => 'string',
+                'sanitize_callback' => [ $this, 'sanitize_environment' ],
+                'default'           => 'development',
+            ]
+        );
+
+        add_settings_section(
+            'monmi_pay_api_section',
+            __( 'Monmi API Credentials', 'monmi-pay' ),
+            '__return_false',
+            self::OPTION_GROUP
+        );
+
+        add_settings_field(
+            self::OPTION_API_KEY,
+            __( 'X-API-Key', 'monmi-pay' ),
+            [ $this, 'render_api_key_field' ],
+            self::OPTION_GROUP,
+            'monmi_pay_api_section'
+        );
+
+        add_settings_field(
+            self::OPTION_SECRET,
+            __( 'Secret Key', 'monmi-pay' ),
+            [ $this, 'render_secret_field' ],
+            self::OPTION_GROUP,
+            'monmi_pay_api_section'
+        );
+
+        add_settings_section(
+            'monmi_pay_env_section',
+            __( 'Environment', 'monmi-pay' ),
+            '__return_false',
+            self::OPTION_GROUP
+        );
+
+        add_settings_field(
+            self::OPTION_ENVIRONMENT,
+            __( 'Environment', 'monmi-pay' ),
+            [ $this, 'render_environment_field' ],
+            self::OPTION_GROUP,
+            'monmi_pay_env_section'
+        );
+    }
+
+    /**
+     * Register admin menu entry.
+     */
+    public function register_settings_page(): void {
+        add_options_page(
+            __( 'Monmi Pay', 'monmi-pay' ),
+            __( 'Monmi Pay', 'monmi-pay' ),
+            'manage_options',
+            'monmi-pay',
+            [ $this, 'render_settings_page' ]
+        );
+    }
+
+    /**
+     * Render the settings page.
+     */
+    public function render_settings_page(): void {
+        if ( ! current_user_can( 'manage_options' ) ) {
+            return;
+        }
+
+        ?>
+        <div class="wrap">
+            <h1><?php esc_html_e( 'Monmi Pay Settings', 'monmi-pay' ); ?></h1>
+            <form method="post" action="options.php">
+                <?php
+                settings_fields( self::OPTION_GROUP );
+                do_settings_sections( self::OPTION_GROUP );
+                submit_button();
+                ?>
+            </form>
+            <?php $this->render_payment_methods_overview(); ?>
+        </div>
+        <?php
+    }
+
+    /**
+     * Output WooCommerce missing notice.
+     */
+    public function render_woocommerce_missing_notice(): void {
+        if ( ! current_user_can( 'activate_plugins' ) ) {
+            return;
+        }
+
+        echo '<div class="notice notice-error"><p>' . esc_html__( 'Monmi Pay requires WooCommerce to be installed and active.', 'monmi-pay' ) . '</p></div>';
+    }
+
+    /**
+     * Render API key field.
+     */
+    public function render_api_key_field(): void {
+        $value = get_option( self::OPTION_API_KEY, '' );
+        printf(
+            '<input type="text" class="regular-text" name="%1$s" value="%2$s" autocomplete="off" />',
+            esc_attr( self::OPTION_API_KEY ),
+            esc_attr( $value )
+        );
+    }
+
+    /**
+     * Render secret field.
+     */
+    public function render_secret_field(): void {
+        $value = get_option( self::OPTION_SECRET, '' );
+        printf(
+            '<input type="password" class="regular-text" name="%1$s" value="%2$s" autocomplete="off" />',
+            esc_attr( self::OPTION_SECRET ),
+            esc_attr( $value )
+        );
+    }
+
+    /**
+     * Render environment select field.
+     */
+    public function render_environment_field(): void {
+        $value   = get_option( self::OPTION_ENVIRONMENT, 'development' );
+        $options = $this->get_environment_options();
+
+        echo '<select name="' . esc_attr( self::OPTION_ENVIRONMENT ) . '">';
+        foreach ( $options as $key => $label ) {
+            printf(
+                '<option value="%1$s" %2$s>%3$s</option>',
+                esc_attr( $key ),
+                selected( $value, $key, false ),
+                esc_html( $label )
+            );
+        }
+        echo '</select>';
+    }
+
+    /**
+     * Sanitize environment option.
+     */
+    public function sanitize_environment( string $value ): string {
+        $value   = strtolower( $value );
+        $options = array_keys( $this->get_environment_options() );
+
+        return in_array( $value, $options, true ) ? $value : 'development';
+    }
+
+    /**
+     * Provide environment choices.
+     */
+    public function get_environment_options(): array {
+        return [
+            'development' => __( 'Development (Testing/Staging)', 'monmi-pay' ),
+            'production'  => __( 'Production (Live)', 'monmi-pay' ),
+        ];
+    }
+
+    /**
+     * Render available payment methods fetched from Monmi.
+     */
+    public function render_payment_methods_overview(): void {
+        echo '<div class="monmi-pay-settings__methods">';
+        echo '<h2>' . esc_html__( 'Available Payment Methods', 'monmi-pay' ) . '</h2>';
+
+        $api_key = trim( (string) get_option( self::OPTION_API_KEY, '' ) );
+        $secret  = trim( (string) get_option( self::OPTION_SECRET, '' ) );
+
+        if ( '' === $api_key || '' === $secret ) {
+            echo '<p>' . esc_html__( 'Enter your API credentials and save changes to load payment methods.', 'monmi-pay' ) . '</p>';
+            echo '</div>';
+            return;
+        }
+
+        $methods = $this->fetch_remote_payment_methods();
+
+        if ( is_wp_error( $methods ) ) {
+            echo '<div class="notice notice-error"><p>' . esc_html( $methods->get_error_message() ) . '</p></div>';
+            echo '</div>';
+            return;
+        }
+
+        if ( empty( $methods ) ) {
+            echo '<p>' . esc_html__( 'No payment methods are available for this environment.', 'monmi-pay' ) . '</p>';
+        } else {
+            echo '<ul class="monmi-pay-settings__methods-list">';
+            foreach ( $methods as $method ) {
+                echo '<li><code>' . esc_html( $method ) . '</code></li>';
+            }
+            echo '</ul>';
+        }
+
+        $environment       = $this->sanitize_environment( get_option( self::OPTION_ENVIRONMENT, 'development' ) );
+        $environment_map   = $this->get_environment_options();
+        $environment_label = $environment_map[ $environment ] ?? ucfirst( $environment );
+        echo '<p class="description">' . sprintf( esc_html__( 'Environment: %s', 'monmi-pay' ), esc_html( $environment_label ) ) . '</p>';
+
+        echo '</div>';
+    }
+
+    /**
+     * Fetch payment methods from Monmi API.
+     *
+     * @return array|WP_Error
+     */
+    private function fetch_remote_payment_methods() {
+        $response = $this->request_monmi_api( '/api/v1/payment/methods', [], 'GET' );
+        if ( is_wp_error( $response ) ) {
+            return $response;
+        }
+
+        $body = $response['body'];
+
+        if ( isset( $body['errorCode'] ) && (int) $body['errorCode'] !== 0 ) {
+            $message = ! empty( $body['message'] ) ? sanitize_text_field( (string) $body['message'] ) : __( 'Monmi API reported an error while retrieving payment methods.', 'monmi-pay' );
+            return new WP_Error( 'monmi_methods_error', $message );
+        }
+
+        $data = $body['data'] ?? [];
+
+        if ( empty( $data ) || ! is_array( $data ) ) {
+            return [];
+        }
+
+        $methods = [];
+        foreach ( $data as $method ) {
+            if ( is_string( $method ) && '' !== $method ) {
+                $methods[] = sanitize_text_field( $method );
+            }
+        }
+
+        return array_values( array_unique( $methods ) );
+    }
+    /**
+     * Register WooCommerce payment gateway.
+     */
+    public function register_gateway( array $gateways ): array {
+        if ( class_exists( 'Monmi_Pay_Gateway' ) ) {
+            $gateways[] = Monmi_Pay_Gateway::class;
+        }
+
+        return $gateways;
+    }
+
+    /**
+     * Register REST API routes.
+     */
+    public function register_rest_routes(): void {
+        $routes = [
+            '/create-payment',
+            '/create-intent',
+        ];
+
+        foreach ( $routes as $route ) {
+            register_rest_route(
+                'monmi-pay/v1',
+                $route,
+                [
+                    'methods'             => 'POST',
+                    'callback'            => [ , 'rest_create_payment' ],
+                    'permission_callback' => '__return_true',
+                ]
+            );
+        }
+    }
+
+
+    /**
+     * Handle create payment REST request.
+     */
+    public function rest_create_payment( WP_REST_Request $request ) {
+        $nonce = $request->get_header( 'x-wp-nonce' );
+        if ( ! $nonce || ! wp_verify_nonce( $nonce, 'wp_rest' ) ) {
+            return new WP_Error( 'monmi_invalid_nonce', __( 'Invalid request signature.', 'monmi-pay' ), [ 'status' => 403 ] );
+        }
+
+        if ( ! function_exists( 'WC' ) || ! WC()->session ) {
+            return new WP_Error( 'monmi_no_session', __( 'WooCommerce session not available.', 'monmi-pay' ), [ 'status' => 400 ] );
+        }
+
+        if ( function_exists( 'wc_load_cart' ) ) {
+            wc_load_cart();
+        }
+
+        $payload = $this->build_payment_payload( $request );
+        if ( is_wp_error( $payload ) ) {
+            return $payload;
+        }
+
+        $response = $this->request_monmi_api( '/api/v1/payment', $payload );
+        if ( is_wp_error( $response ) ) {
+            return $response;
+        }
+
+        $body = $response['body'] ?? [];
+        $data = $body['data'] ?? [];
+
+        if ( empty( $data ) || empty( $data['token'] ) ) {
+            return new WP_Error(
+                'monmi_missing_token',
+                __( 'Payment token missing from Monmi response.', 'monmi-pay' ),
+                [
+                    'status' => 500,
+                    'body'   => $body,
+                ]
+            );
+        }
+
+        $token  = sanitize_text_field( (string) $data['token'] );
+        $code   = isset( $data['code'] ) ? sanitize_text_field( (string) $data['code'] ) : '';
+        $status = isset( $data['status'] ) ? sanitize_text_field( (string) $data['status'] ) : '';
+
+        if ( function_exists( 'WC' ) && WC()->session ) {
+            WC()->session->set(
+                'monmi_payment_session',
+                [
+                    'token'  => $token,
+                    'code'   => $code,
+                    'status' => $status,
+                    'data'   => $data,
+                ]
+            );
+        }
+
+        return rest_ensure_response(
+            [
+                'token'   => $token,
+                'payment' => $data,
+                'status'  => ,
+                'message' => $body['message'] ?? '',
+            ]
+        );
+    }
+
+    /**
+     * Persist checkout data into order meta.
+     */
+    public function persist_checkout_meta( WC_Order $order, array $data ): void {
+        if ( ! class_exists( 'Monmi_Pay_Gateway' ) ) {
+            return;
+        }
+
+        if ( empty( $data['payment_method'] ) || Monmi_Pay_Gateway::GATEWAY_ID !== $data['payment_method'] ) {
+            return;
+        }
+
+        $token   = isset( $_POST['monmi_payment_token'] ) ? sanitize_text_field( wp_unslash( $_POST['monmi_payment_token'] ) ) : '';
+        $code    = isset( $_POST['monmi_payment_code'] ) ? sanitize_text_field( wp_unslash( $_POST['monmi_payment_code'] ) ) : '';
+        $status  = isset( $_POST['monmi_payment_status'] ) ? sanitize_text_field( wp_unslash( $_POST['monmi_payment_status'] ) ) : '';
+        $payload = isset( $_POST['monmi_payment_payload'] ) ? wp_unslash( $_POST['monmi_payment_payload'] ) : '';
+
+        if ( $token ) {
+            $order->update_meta_data( '_monmi_payment_token', $token );
+        }
+
+        if ( $code ) {
+            $order->update_meta_data( '_monmi_payment_code', $code );
+        }
+
+        if ( $status ) {
+            $order->update_meta_data( '_monmi_payment_status', $status );
+        }
+
+        if ( $payload ) {
+            $decoded = json_decode( $payload, true );
+            if ( null !== $decoded ) {
+                $order->update_meta_data( '_monmi_payment_payload', wp_json_encode( $decoded ) );
+            } else {
+                $order->update_meta_data( '_monmi_payment_payload_raw', sanitize_textarea_field( $payload ) );
+            }
+        }
+
+        if ( function_exists( 'WC' ) && WC()->session ) {
+            WC()->session->__unset( 'monmi_payment_session' );
+        }
+    }
+
+    /**
+     * Inject checkout bootstrap markup after the checkout form.
+     */
+    public function inject_checkout_bootstrap(): void {
+        if ( ! function_exists( 'is_checkout' ) || ! is_checkout() ) {
+            return;
+        }
+
+        if ( ! $this->is_gateway_available_for_checkout() ) {
+            return;
+        }
+
+        echo '<div id="monmi-pay-bootstrap" data-monmi-pay="1"></div>';
+        echo '<script type="text/javascript">window.MonmiPayCheckoutHook = true;</script>';
+    }
+
+    /**
+     * Determine if the Monmi gateway is available on checkout.
+     */
+    private function is_gateway_available_for_checkout(): bool {
+        if ( ! function_exists( 'WC' ) || ! WC()->payment_gateways() ) {
+            return false;
+        }
+
+        $gateways = WC()->payment_gateways();
+        if ( ! is_object( $gateways ) ) {
+            return false;
+        }
+        if ( ! $gateways ) {
+            return false;
+        }
+
+        $available = $gateways->get_available_payment_gateways();
+
+        return isset( $available[ Monmi_Pay_Gateway::GATEWAY_ID ] );
+    }
+
+    /**
+     * Build Monmi payment payload from request and cart context.
+     */
+    private function build_payment_payload( WP_REST_Request $request ) {
+        if ( ! function_exists( 'WC' ) || ! WC()->cart ) {
+            return new WP_Error( 'monmi_no_cart', __( 'WooCommerce cart not available.', 'monmi-pay' ), [ 'status' => 400 ] );
+        }
+
+        $billing  = $this->sanitize_address( (array) $request->get_param( 'billing' ) );
+        $shipping = $this->sanitize_address( (array) $request->get_param( 'shipping' ) );
+
+        $cart     = WC()->cart;
+        $currency = function_exists( 'get_woocommerce_currency' ) ? get_woocommerce_currency() : 'USD';
+        $items    = $this->build_cart_items( $cart );
+
+        if ( empty( $items ) ) {
+            return new WP_Error( 'monmi_missing_items', __( 'Unable to determine cart items for Monmi payment.', 'monmi-pay' ), [ 'status' => 400 ] );
+        }
+
+        $transaction_id = wp_generate_uuid4();
+        $timestamp      = (int) round( microtime( true ) * 1000 );
+        $discount_total = (float) $cart->get_discount_total();
+
+        $store = [
+            'name'    => get_bloginfo( 'name' ),
+            'email'   => sanitize_email( get_bloginfo( 'admin_email' ) ),
+            'orderId' => $transaction_id,
+        ];
+
+        $payer = [
+            'firstName' => $billing['first_name'] ?? '',
+            'lastName'  => $billing['last_name'] ?? '',
+            'email'     => $billing['email'] ?? '',
+            'phone'     => $billing['phone'] ?? '',
+            'address'   => [
+                'line'    => $billing['address_1'] ?? '',
+                'street'  => $billing['address_2'] ?? '',
+                'city'    => $billing['city'] ?? '',
+                'state'   => $billing['state'] ?? '',
+                'country' => $billing['country'] ?? '',
+                'zipCode' => $billing['postcode'] ?? '',
+            ],
+        ];
+
+        $return_url = esc_url_raw( add_query_arg( 'monmi', 'success', wc_get_checkout_url() ) );
+        $cancel_url = esc_url_raw( add_query_arg( 'monmi', 'cancel', wc_get_checkout_url() ) );
+
+        $payload = [
+            'timestamp'     => $timestamp,
+            'transactionId' => $transaction_id,
+            'method'        => 'CARD',
+            'currency'      => $currency,
+            'items'         => $items,
+            'store'         => $store,
+            'payer'         => $payer,
+            'discount'      => $discount_total,
+            'returnUrl'     => $return_url,
+            'cancelUrl'     => $cancel_url,
+        ];
+
+        /**
+         * Filter the payment payload before it is sent to Monmi.
+         */
+        return apply_filters( 'monmi_pay_payment_payload', $payload, $request, $cart );
+    }
+
+    /**
+     * Sanitize address data array.
+     */
+    private function sanitize_address( array $address ): array {
+        $fields = [
+            'first_name',
+            'last_name',
+            'company',
+            'address_1',
+            'address_2',
+            'city',
+            'state',
+            'postcode',
+            'country',
+            'email',
+            'phone',
+        ];
+
+        $sanitized = [];
+        foreach ( $fields as $field ) {
+            if ( isset( $address[ $field ] ) ) {
+                $sanitized[ $field ] = sanitize_text_field( wp_unslash( $address[ $field ] ) );
+            }
+        }
+
+        return $sanitized;
+    }
+
+    /**
+     * Build cart items payload for Monmi API.
+     */
+    private function build_cart_items( WC_Cart $cart ): array {
+        $items = [];
+
+        foreach ( $cart->get_cart() as $cart_item ) {
+            $product  = isset( $cart_item['data'] ) && $cart_item['data'] instanceof WC_Product ? $cart_item['data'] : null;
+            $name     = $product ? $product->get_name() : __( 'Item', 'monmi-pay' );
+            $quantity = isset( $cart_item['quantity'] ) ? (int) $cart_item['quantity'] : 0;
+            $quantity = $quantity > 0 ? $quantity : 1;
+
+            $line_total = isset( $cart_item['line_total'] ) ? (float) $cart_item['line_total'] : 0.0;
+            if ( 0 >= $line_total && $product ) {
+                $line_total = function_exists( 'wc_get_price_excluding_tax' ) ? (float) wc_get_price_excluding_tax( $product ) : 0.0;
+                if ( 0 >= $line_total ) {
+                    $line_total = (float) $product->get_price();
+                }
+            }
+
+            $unit_total = $quantity > 0 ? ( $line_total / $quantity ) : $line_total;
+
+            $items[] = [
+                'name'     => $name,
+                'amount'   => $this->format_amount( $unit_total ),
+                'quantity' => (string) $quantity,
+            ];
+        }
+
+        return $items;
+    }
+
+    /**
+     * Format amount for API payload.
+     */
+    public function format_amount( float $amount ): string {
+        return number_format( $amount, 2, '.', '' );
+    }
+
+    /**
+     * Execute request to Monmi API.
+     */
+    public function request_monmi_api( string $endpoint, array $body = [], string $method = 'POST' ) {
+        $api_key = get_option( self::OPTION_API_KEY, '' );
+        $secret  = get_option( self::OPTION_SECRET, '' );
+        $env     = get_option( self::OPTION_ENVIRONMENT, 'development' );
+        $base    = $this->get_environment_base_url( $env );
+
+        if ( empty( $api_key ) || empty( $secret ) ) {
+            return new WP_Error( 'monmi_missing_credentials', __( 'Monmi API credentials are missing.', 'monmi-pay' ) );
+        }
+
+        if ( ! $base ) {
+            return new WP_Error( 'monmi_missing_base', __( 'Monmi API base URL is not configured.', 'monmi-pay' ) );
+        }
+
+        $request_id = wp_generate_uuid4();
+        $timestamp  = gmdate( 'c' );
+
+        $headers = [
+            'Content-Type'    => 'application/json',
+            'x-api-key'       => $api_key,
+            'x-request-id'    => $request_id,
+            'x-timestamp'     => $timestamp,
+            'x-api-signature' => $this->generate_signature( $secret, $request_id, $timestamp ),
+        ];
+
+        $method = strtoupper( $method );
+        $args = [
+            'method'  => $method,
+            'headers' => $headers,
+            'timeout' => 20,
+        ];
+
+        if ( ! empty( \ ) && 'GET' !== \ ) {
+            $args['body'] = wp_json_encode( $body );
+        }
+
+        $url      = trailingslashit( $base ) . ltrim( $endpoint, '/' );
+        $response = wp_remote_request( $url, $args );
+
+        if ( is_wp_error( $response ) ) {
+            return $response;
+        }
+
+        $code = wp_remote_retrieve_response_code( $response );
+        if ( $code < 200 || $code >= 300 ) {
+            return new WP_Error(
+                'monmi_api_http_error',
+                sprintf( __( 'Monmi API responded with HTTP %d.', 'monmi-pay' ), $code ),
+                [
+                    'status' => $code,
+                    'body'   => wp_remote_retrieve_body( $response ),
+                ]
+            );
+        }
+
+        $decoded = json_decode( wp_remote_retrieve_body( $response ), true );
+        if ( null === $decoded ) {
+            return new WP_Error( 'monmi_api_invalid_json', __( 'Unable to parse Monmi API response.', 'monmi-pay' ) );
+        }
+
+        return [
+            'body'    => $decoded,
+            'headers' => $headers,
+        ];
+    }
+
+    /**
+     * Generate signature for Monmi API request.
+     */
+    public function generate_signature( string $secret, string $request_id, string $timestamp ): string {
+        $payload = $request_id . '.' . $timestamp;
+        return hash_hmac( 'sha256', $payload, $secret );
+    }
+
+    /**
+     * Retrieve base URL for environment.
+     */
+    public function get_environment_base_url( ?string $environment = null ): string {
+        $environment = $environment ?: get_option( self::OPTION_ENVIRONMENT, 'development' );
+
+        $map = [
+            'development' => 'https://store-hub-api-develop.myepis.cloud',
+            'production'  => 'https://store-hub-api.myepis.cloud',
+        ];
+
+        return $map[ $environment ] ?? '';
+    }
+
+    /**
+     * Confirm payment via Monmi API.
+     */
+    public function confirm_payment( WC_Order $order, string $client_secret, string $payment_method = '' ) {
+        $payload = [
+            'client_secret' => $client_secret,
+            'order_id'      => $order->get_id(),
+            'amount'        => [
+                'currency' => $order->get_currency(),
+                'value'    => $this->format_amount( (float) $order->get_total() ),
+            ],
+            'metadata'      => [
+                'order_key' => $order->get_order_key(),
+                'site_url'  => home_url(),
+            ],
+        ];
+
+        if ( $payment_method ) {
+            $payload['payment_method'] = [ 'id' => $payment_method ];
+        }
+
+        $payload = apply_filters( 'monmi_pay_confirm_payload', $payload, $order );
+
+        return $this->request_monmi_api( '/payments/confirm', $payload );
+    }
+}
+add_action(
+    'plugins_loaded',
+    static function () {
+        Monmi_Pay_Plugin::instance();
+    },
+    20
+);
+
+
+
+
