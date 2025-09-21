@@ -16,11 +16,12 @@ function bumpVersion() {
   fs.writeFileSync(PACKAGE_JSON, JSON.stringify(pkg, null, 2) + '\n');
   return next;
 }
-
 function updatePhpVersion(version) {
   const contents = fs.readFileSync(PHP_ENTRY, 'utf8');
-  const replaced = contents.replace(/(\* Version:\s*)([0-9]+\.[0-9]+\.[0-9]+)/, `$1${version}`);
-  fs.writeFileSync(PHP_ENTRY, replaced);
+  const updated = contents
+    .replace(/(\* Version:\s*)([0-9]+\.[0-9]+\.[0-9]+)/, `$1${version}`)
+    .replace(/(const\s+VERSION\s*=\s*')[0-9]+\.[0-9]+\.[0-9]+(')/, `$1${version}$2`);
+  fs.writeFileSync(PHP_ENTRY, updated);
 }
 
 async function buildZip(version) {

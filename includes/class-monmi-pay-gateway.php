@@ -197,14 +197,19 @@ class Monmi_Pay_Gateway extends WC_Payment_Gateway {
         }
 
         return [
-            'redirect' => apply_filters( 'monmi_pay_checkout_redirect', ->get_return_url(  ),  ),
-            'redirect' => $this->get_return_url( $order ),
+            'result'   => 'success',
+            'redirect' => apply_filters(
+                'monmi_pay_checkout_redirect',
+                $this->get_return_url( $order ),
+                $order
+            ),
         ];
     }
 
     /**
      * Display details on thank-you page.
      */
+
     public function thankyou_page( $order_id ): void {
         $order = wc_get_order( $order_id );
         if ( ! $order ) {
