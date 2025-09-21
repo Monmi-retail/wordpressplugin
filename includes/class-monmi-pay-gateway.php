@@ -126,6 +126,7 @@ class Monmi_Pay_Gateway extends WC_Payment_Gateway {
                 'createPaymentUrl' => esc_url_raw( rest_url( 'monmi-pay/v1/create-payment' ) ),
                 'environment'      => get_option( Monmi_Pay_Plugin::OPTION_ENVIRONMENT, 'development' ),
                 'currency'         => get_woocommerce_currency(),
+                'session'         => $this->get_localized_session_seed(),
                 'i18n'             => [
                     'genericError'    => __( 'Unable to process your payment at this time. Please try again.', 'monmi-pay' ),
                     'sdkMissing'      => __( 'Payment library still loading. Please wait a moment and try again.', 'monmi-pay' ),
@@ -209,6 +210,55 @@ class Monmi_Pay_Gateway extends WC_Payment_Gateway {
     /**
      * Display details on thank-you page.
      */
+
+    private function get_localized_session_seed(): array {
+        if ( ! function_exists( 'WC' ) || ! WC()->session ) {
+            return [];
+        }
+
+        $session = WC()->session->get( 'monmi_payment_session', [] );
+        if ( empty( $session ) || ! is_array( $session ) ) {
+            return [];
+        }
+
+        $seed = [
+            'token'  => isset( $session['token'] ) ? sanitize_text_field( (string) $session['token'] ) : '',
+            'code'   => isset( $session['code'] ) ? sanitize_text_field( (string) $session['code'] ) : '',
+            'status' => isset( $session['status'] ) ? sanitize_text_field( (string) $session['status'] ) : '',
+        ];
+
+        if ( ! empty( $session['data'] ) ) {
+            $seed['data'] = $this->sanitize_session_data( $session['data'] );
+        }
+
+        return array_filter(
+            $seed,
+            static function ( $value ) {
+                if ( is_array( $value ) ) {
+                    return ! empty( $value );
+                }
+
+                return '' !== $value;
+            }
+        );
+    }
+
+    private function sanitize_session_data( $data ) {
+        if ( is_array( $data ) ) {
+            $sanitized = [];
+            foreach ( $data as $key => $value ) {
+                $sanitized[ sanitize_key( (string) $key ) ] = $this->sanitize_session_data( $value );
+            }
+
+            return $sanitized;
+        }
+
+        if ( is_scalar( $data ) ) {
+            return sanitize_text_field( (string) $data );
+        }
+
+        return $data;
+    }
 
     public function thankyou_page( $order_id ): void {
         $order = wc_get_order( $order_id );

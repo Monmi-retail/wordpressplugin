@@ -35,6 +35,10 @@
             this.statusInput = $('#monmi_payment_status');
             this.payloadInput = $('#monmi_payment_payload');
 
+            if (DATA.session) {
+                this.applySessionSeed(DATA.session);
+            }
+
             $(document.body).on('updated_checkout', () => {
                 this.refresh();
             });
@@ -113,6 +117,36 @@
                 this.payloadInput.val('');
             }
         },
+        applySessionSeed(seed) {
+            if (!seed || typeof seed !== 'object') {
+                return;
+            }
+
+            if (seed.token) {
+                this.paymentToken = seed.token;
+            }
+
+            if (seed.data && typeof seed.data === 'object') {
+                this.paymentData = seed.data;
+            }
+
+            if (seed.code) {
+                this.paymentData = this.paymentData || {};
+                this.paymentData.code = seed.code;
+            }
+
+            if (seed.status) {
+                this.paymentData = this.paymentData || {};
+                this.paymentData.status = seed.status;
+            }
+
+            if (seed.status && this.statusInput.length) {
+                this.statusInput.val(seed.status);
+            }
+
+            this.populateHiddenFields();
+        }
+
 
         ensurePaymentSession(forceUpdate) {
             if (!this.cardContainer.length) {
@@ -147,9 +181,18 @@
                 credentials: 'same-origin',
                 body: JSON.stringify(payload),
             })
-                .then((response) => {
+                .then(async (response) => {
                     if (!response.ok) {
-                        throw new Error(response.statusText || 'Unable to create Monmi payment.');
+                        let message = response.statusText || DATA.i18n.genericError || 'Unable to create Monmi payment.';
+                        try {
+                            const errorBody = await response.json();
+                            if (errorBody && errorBody.message) {
+                                message = errorBody.message;
+                            }
+                        } catch (parseError) {
+                            // Ignore JSON parse failures, fall back to default message.
+                        }
+                        throw new Error(message);
                     }
                     return response.json();
                 })
@@ -160,6 +203,14 @@
 
                     this.paymentToken = data.token;
                     this.paymentData = data.payment || {};
+
+                    if (data.code) {
+                        this.paymentData.code = data.code;
+                    }
+
+                    if (data.status) {
+                        this.paymentData.status = data.status;
+                    }
                     this.populateHiddenFields();
                     this.clearError();
                     this.renderCardElement();
@@ -178,7 +229,8 @@
             }
 
             if (this.statusInput.length) {
-                this.statusInput.val(this.paymentToken ? 'pending' : '');
+                const status = this.paymentData && this.paymentData.status ? this.paymentData.status : (this.paymentToken ? 'pending' : '');
+                this.statusInput.val(status);
             }
 
             if (this.codeInput.length) {
@@ -290,12 +342,15 @@
                 this.paymentData = result.payment || result.payload;
             }
 
+            if (!this.paymentData) {
+                this.paymentData = {};
+            }
+
             if (result && result.code) {
-                if (!this.paymentData) {
-                    this.paymentData = {};
-                }
                 this.paymentData.code = result.code;
             }
+
+            this.paymentData.status = 'success';
 
             this.populateHiddenFields();
 
