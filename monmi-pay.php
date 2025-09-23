@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Monmi Pay
  * Description: Provides a Monmi Pay payment gateway and settings for WooCommerce.
- * Version: 0.1.14
+ * Version: 0.1.22
  * Author: Monmi
  */
 
@@ -27,7 +27,7 @@ final class Monmi_Pay_Plugin {
     const OPTION_API_KEY     = 'monmi_pay_api_key';
     const OPTION_SECRET      = 'monmi_pay_secret_key';
     const OPTION_ENVIRONMENT = 'monmi_pay_environment';
-    const VERSION            = '0.1.14';
+    const VERSION            = '0.1.22';
     private const DEBUG_TRANSIENT_KEY = 'monmi_pay_last_request_snapshot';
 
     /** @var Monmi_Pay_Plugin|null */
@@ -67,6 +67,10 @@ final class Monmi_Pay_Plugin {
 
         add_filter( 'woocommerce_payment_gateways', [ $this, 'register_gateway' ] );
         add_action( 'rest_api_init', [ $this, 'register_rest_routes' ] );
+        add_action( 'init', [ $this, 'register_scripts' ] );
+        add_action( 'enqueue_block_assets', [ $this, 'enqueue_block_assets' ] );
+        add_action( 'enqueue_block_editor_assets', [ $this, 'enqueue_block_assets' ] );
+        add_filter( 'woocommerce_blocks_payment_method_type_registration', [ $this, 'register_blocks_payment_method' ] );
         add_action( 'woocommerce_checkout_create_order', [ $this, 'persist_checkout_meta' ], 10, 2 );
     }
 
@@ -84,6 +88,120 @@ final class Monmi_Pay_Plugin {
         }
 
         require_once MONMI_PAY_PLUGIN_PATH . 'includes/class-monmi-pay-gateway.php';
+    }
+    /**
+     * Register shared script handles.
+     */
+    public function register_scripts(): void {
+        if ( ! function_exists( 'wp_register_script' ) ) {
+            return;
+        }
+
+        wp_register_script(
+            'monmi-pay-sdk',
+            'https://cdn-payment.monmi.uk/monmi-pay.js',
+            [],
+            null,
+            true
+        );
+
+        wp_register_script(
+            'monmi-pay-checkout',
+            MONMI_PAY_PLUGIN_URL . 'js/monmi-checkout.js',
+            [ 'jquery', 'monmi-pay-sdk' ],
+            self::VERSION,
+            true
+        );
+
+        $blocks_dependencies = [
+            'wp-element',
+            'wp-i18n',
+            'wp-html-entities',
+            'wc-settings',
+            'wc-blocks-registry',
+            'monmi-pay-sdk',
+        ];
+        $blocks_version      = self::VERSION;
+        $asset_path          = MONMI_PAY_PLUGIN_PATH . 'build/monmi-blocks.asset.php';
+
+        if ( file_exists( $asset_path ) ) {
+            $asset = include $asset_path;
+            if ( is_array( $asset ) ) {
+                if ( ! empty( $asset['dependencies'] ) && is_array( $asset['dependencies'] ) ) {
+                    $blocks_dependencies = $asset['dependencies'];
+                }
+
+                if ( ! empty( $asset['version'] ) ) {
+                    $blocks_version = $asset['version'];
+                }
+            }
+        }
+
+        if ( ! in_array( 'monmi-pay-sdk', $blocks_dependencies, true ) ) {
+            $blocks_dependencies[] = 'monmi-pay-sdk';
+        }
+
+        wp_register_script(
+            'monmi-blocks',
+            MONMI_PAY_PLUGIN_URL . 'build/monmi-blocks.js',
+            $blocks_dependencies,
+            $blocks_version,
+            true
+        );
+    }
+
+    /**
+     * Ensure Blocks assets load alongside the payment method.
+     */
+    public function enqueue_block_assets(): void {
+        if ( ! wp_script_is( 'monmi-pay-sdk', 'registered' ) || ! wp_script_is( 'monmi-blocks', 'registered' ) ) {
+            $this->register_scripts();
+        }
+
+        wp_enqueue_script( 'monmi-pay-sdk' );
+        wp_enqueue_script( 'monmi-blocks' );
+    }
+
+    /**
+     * Register the WooCommerce Blocks payment method integration.
+     *
+     * @param mixed $payment_method_types Payment method registry or legacy array.
+     */
+    public function register_blocks_payment_method( $payment_method_types ) {
+        if ( ! class_exists( 'Automattic\WooCommerce\Blocks\Payments\Integrations\AbstractPaymentMethodType' ) ) {
+            return $payment_method_types;
+        }
+
+        if ( ! class_exists( 'Monmi_Pay_Blocks_Payment_Method' ) ) {
+            $integration_path = MONMI_PAY_PLUGIN_PATH . 'includes/class-monmi-pay-blocks.php';
+
+            if ( file_exists( $integration_path ) ) {
+                require_once $integration_path;
+            } else {
+                return $payment_method_types;
+            }
+        }
+
+        if ( class_exists( 'Automattic\WooCommerce\Blocks\Payments\PaymentMethodRegistry' )
+            && $payment_method_types instanceof Automattic\WooCommerce\Blocks\Payments\PaymentMethodRegistry ) {
+            if ( ! $payment_method_types->has( Monmi_Pay_Gateway::GATEWAY_ID ) ) {
+                $payment_method_types->register( new Monmi_Pay_Blocks_Payment_Method( $this ) );
+            }
+
+            return $payment_method_types;
+        }
+
+        if ( is_array( $payment_method_types ) ) {
+            foreach ( $payment_method_types as $payment_method_type ) {
+                if ( $payment_method_type instanceof Monmi_Pay_Blocks_Payment_Method ) {
+                    return $payment_method_types;
+                }
+            }
+
+            $payment_method_types[] = new Monmi_Pay_Blocks_Payment_Method( $this );
+        }
+
+        return $payment_method_types;
     }
     /**
      * Register plugin settings.
@@ -741,6 +859,9 @@ final class Monmi_Pay_Plugin {
     /**
      * Persist checkout data into order meta.
      */
+    /**
+     * Persist checkout data into order meta.
+     */
     public function persist_checkout_meta( $order, array $data ): void {
         if ( ! class_exists( 'WC_Order' ) || ! ( $order instanceof WC_Order ) ) {
             return;
@@ -748,15 +869,82 @@ final class Monmi_Pay_Plugin {
         if ( ! class_exists( 'Monmi_Pay_Gateway' ) ) {
             return;
         }
+
         $selected_method = $data['payment_method'] ?? ( isset( $_POST['payment_method'] ) ? sanitize_text_field( wp_unslash( $_POST['payment_method'] ) ) : '' );
         if ( Monmi_Pay_Gateway::GATEWAY_ID !== $selected_method ) {
             return;
         }
 
-        $token   = isset( $_POST['monmi_payment_token'] ) ? sanitize_text_field( wp_unslash( $_POST['monmi_payment_token'] ) ) : '';
-        $code    = isset( $_POST['monmi_payment_code'] ) ? sanitize_text_field( wp_unslash( $_POST['monmi_payment_code'] ) ) : '';
-        $status  = isset( $_POST['monmi_payment_status'] ) ? sanitize_text_field( wp_unslash( $_POST['monmi_payment_status'] ) ) : '';
-        $payload = isset( $_POST['monmi_payment_payload'] ) ? wp_unslash( $_POST['monmi_payment_payload'] ) : '';
+        $payment_method_data = isset( $data['payment_method_data'] ) && is_array( $data['payment_method_data'] )
+            ? $data['payment_method_data']
+            : [];
+
+        $token         = '';
+        $code          = '';
+        $status        = '';
+        $payload_raw   = '';
+        $payload_array = null;
+
+        if ( ! empty( $payment_method_data ) ) {
+            $token  = isset( $payment_method_data['token'] ) ? sanitize_text_field( (string) $payment_method_data['token'] ) : '';
+            if ( ! $token && isset( $payment_method_data['monmi_payment_token'] ) ) {
+                $token = sanitize_text_field( (string) $payment_method_data['monmi_payment_token'] );
+            }
+
+            $code   = isset( $payment_method_data['code'] ) ? sanitize_text_field( (string) $payment_method_data['code'] ) : '';
+            if ( ! $code && isset( $payment_method_data['monmi_payment_code'] ) ) {
+                $code = sanitize_text_field( (string) $payment_method_data['monmi_payment_code'] );
+            }
+
+            $status = isset( $payment_method_data['status'] ) ? sanitize_text_field( (string) $payment_method_data['status'] ) : '';
+            if ( ! $status && isset( $payment_method_data['monmi_payment_status'] ) ) {
+                $status = sanitize_text_field( (string) $payment_method_data['monmi_payment_status'] );
+            }
+
+            if ( array_key_exists( 'payload', $payment_method_data ) ) {
+                $payload_value = $payment_method_data['payload'];
+            } elseif ( array_key_exists( 'data', $payment_method_data ) ) {
+                $payload_value = $payment_method_data['data'];
+            } elseif ( array_key_exists( 'monmi_payment_payload', $payment_method_data ) ) {
+                $payload_value = $payment_method_data['monmi_payment_payload'];
+            } else {
+                $payload_value = null;
+            }
+
+            if ( is_string( $payload_value ) ) {
+                $payload_raw = $payload_value;
+                $decoded     = json_decode( $payload_raw, true );
+                if ( null !== $decoded ) {
+                    $payload_array = $decoded;
+                }
+            } elseif ( is_array( $payload_value ) ) {
+                $payload_array = $payload_value;
+            }
+        }
+
+        if ( empty( $payment_method_data ) ) {
+            if ( isset( $_POST['monmi_payment_token'] ) ) {
+                $token = sanitize_text_field( wp_unslash( $_POST['monmi_payment_token'] ) );
+            }
+
+            if ( isset( $_POST['monmi_payment_code'] ) ) {
+                $code = sanitize_text_field( wp_unslash( $_POST['monmi_payment_code'] ) );
+            }
+
+            if ( isset( $_POST['monmi_payment_status'] ) ) {
+                $status = sanitize_text_field( wp_unslash( $_POST['monmi_payment_status'] ) );
+            }
+
+            if ( isset( $_POST['monmi_payment_payload'] ) ) {
+                $payload_raw = wp_unslash( $_POST['monmi_payment_payload'] );
+                if ( is_string( $payload_raw ) && '' !== $payload_raw ) {
+                    $decoded = json_decode( $payload_raw, true );
+                    if ( null !== $decoded ) {
+                        $payload_array = $decoded;
+                    }
+                }
+            }
+        }
 
         if ( $token ) {
             $order->update_meta_data( '_monmi_payment_token', $token );
@@ -770,13 +958,14 @@ final class Monmi_Pay_Plugin {
             $order->update_meta_data( '_monmi_payment_status', $status );
         }
 
-        if ( $payload ) {
-            $decoded = json_decode( $payload, true );
-            if ( null !== $decoded ) {
-                $order->update_meta_data( '_monmi_payment_payload', wp_json_encode( $decoded ) );
-            } else {
-                $order->update_meta_data( '_monmi_payment_payload_raw', sanitize_textarea_field( $payload ) );
+        if ( is_array( $payload_array ) ) {
+            if ( function_exists( 'wc_clean' ) ) {
+                $payload_array = wc_clean( $payload_array );
             }
+
+            $order->update_meta_data( '_monmi_payment_payload', wp_json_encode( $payload_array ) );
+        } elseif ( is_string( $payload_raw ) && '' !== $payload_raw ) {
+            $order->update_meta_data( '_monmi_payment_payload_raw', sanitize_textarea_field( $payload_raw ) );
         }
 
         if ( function_exists( 'WC' ) && WC()->session ) {

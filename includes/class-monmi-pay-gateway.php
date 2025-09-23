@@ -108,15 +108,12 @@ class Monmi_Pay_Gateway extends WC_Payment_Gateway {
             return;
         }
 
-        wp_enqueue_script( 'monmi-pay-sdk', 'https://cdn-payment.monmi.uk/monmi-pay.js', [], null, true );
-        wp_enqueue_script(
-            'monmi-pay-checkout',
-            MONMI_PAY_PLUGIN_URL . 'js/monmi-checkout.js',
-            [ 'jquery' ],
-            Monmi_Pay_Plugin::VERSION,
-            true
-        );
+        if ( ! wp_script_is( 'monmi-pay-sdk', 'registered' ) || ! wp_script_is( 'monmi-pay-checkout', 'registered' ) ) {
+            Monmi_Pay_Plugin::instance()->register_scripts();
+        }
 
+        wp_enqueue_script( 'monmi-pay-sdk' );
+        wp_enqueue_script( 'monmi-pay-checkout' );
         wp_localize_script(
             'monmi-pay-checkout',
             'MonmiPayData',
@@ -126,7 +123,7 @@ class Monmi_Pay_Gateway extends WC_Payment_Gateway {
                 'createPaymentUrl' => esc_url_raw( rest_url( 'monmi-pay/v1/create-payment' ) ),
                 'environment'      => get_option( Monmi_Pay_Plugin::OPTION_ENVIRONMENT, 'development' ),
                 'currency'         => get_woocommerce_currency(),
-                'session'         => $this->get_localized_session_seed(),
+                'session'         => self::get_localized_session_seed(),
                 'i18n'             => [
                     'genericError'    => __( 'Unable to process your payment at this time. Please try again.', 'monmi-pay' ),
                     'sdkMissing'      => __( 'Payment library still loading. Please wait a moment and try again.', 'monmi-pay' ),
@@ -211,7 +208,7 @@ class Monmi_Pay_Gateway extends WC_Payment_Gateway {
      * Display details on thank-you page.
      */
 
-    private function get_localized_session_seed(): array {
+    public static function get_localized_session_seed(): array {
         if ( ! function_exists( 'WC' ) || ! WC()->session ) {
             return [];
         }
@@ -228,7 +225,7 @@ class Monmi_Pay_Gateway extends WC_Payment_Gateway {
         ];
 
         if ( ! empty( $session['data'] ) ) {
-            $seed['data'] = $this->sanitize_session_data( $session['data'] );
+            $seed['data'] = self::sanitize_session_data( $session['data'] );
         }
 
         return array_filter(
@@ -243,11 +240,11 @@ class Monmi_Pay_Gateway extends WC_Payment_Gateway {
         );
     }
 
-    private function sanitize_session_data( $data ) {
+    private static function sanitize_session_data( $data ) {
         if ( is_array( $data ) ) {
             $sanitized = [];
             foreach ( $data as $key => $value ) {
-                $sanitized[ sanitize_key( (string) $key ) ] = $this->sanitize_session_data( $value );
+                $sanitized[ sanitize_key( (string) $key ) ] = self::sanitize_session_data( $value );
             }
 
             return $sanitized;

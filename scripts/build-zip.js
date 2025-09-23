@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const semver = require('semver');
 const archiver = require('archiver');
+const { execSync } = require('child_process');
 
 const ROOT = process.cwd();
 const PACKAGE_JSON = path.join(ROOT, 'package.json');
@@ -16,6 +17,7 @@ function bumpVersion() {
   fs.writeFileSync(PACKAGE_JSON, JSON.stringify(pkg, null, 2) + '\n');
   return next;
 }
+
 function updatePhpVersion(version) {
   const contents = fs.readFileSync(PHP_ENTRY, 'utf8');
   const updated = contents
@@ -27,6 +29,7 @@ function updatePhpVersion(version) {
 async function buildZip(version) {
   await fs.promises.mkdir(DIST_DIR, { recursive: true });
   const outputPath = path.join(DIST_DIR, `monmi-pay-${version}.zip`);
+
   return new Promise((resolve, reject) => {
     const output = fs.createWriteStream(outputPath);
     const archive = archiver('zip', { zlib: { level: 9 } });
@@ -43,35 +46,27 @@ async function buildZip(version) {
 
     archive.pipe(output);
 
-    const include = [
-      'monmi-pay.php',
-      'includes/**/*',
-      'js/**/*',
-      'readme.txt',
-      'README.md',
-      'LICENSE'
-    ];
+    const addDirectory = (relativePath) => {
+      const fullPath = path.join(ROOT, relativePath);
+      if (fs.existsSync(fullPath)) {
+        archive.directory(fullPath, relativePath);
+      }
+    };
 
-    const ignore = [
-      'node_modules/**',
-      'dist/**',
-      'scripts/**',
-      'package-lock.json',
-      'package.json',
-      '.git/**',
-      '.gitignore',
-      '.npmrc',
-      '*.zip'
-    ];
+    const addFile = (relativePath) => {
+      const fullPath = path.join(ROOT, relativePath);
+      if (fs.existsSync(fullPath)) {
+        archive.file(fullPath, { name: relativePath });
+      }
+    };
 
-    include.forEach((pattern) => {
-      archive.glob(pattern, {
-        cwd: ROOT,
-        dot: false,
-        nodir: false,
-        ignore
-      });
-    });
+    addFile('monmi-pay.php');
+    addDirectory('includes');
+    addDirectory('js');
+    addDirectory('build');
+    addFile('readme.txt');
+    addFile('README.md');
+    addFile('LICENSE');
 
     archive.finalize();
   });
@@ -80,7 +75,9 @@ async function buildZip(version) {
 (async () => {
   const version = bumpVersion();
   updatePhpVersion(version);
+  execSync('npx webpack --config webpack.blocks.js --mode production', { stdio: 'inherit' });
   const zipPath = await buildZip(version);
   const stats = await fs.promises.stat(zipPath);
   console.log(`Created ${zipPath} (${(stats.size / 1024).toFixed(2)} kB)`);
 })();
+
