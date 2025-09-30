@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Monmi Pay
  * Description: Provides a Monmi Pay payment gateway and settings for WooCommerce.
- * Version: 0.1.22
+ * Version: 0.1.23
  * Author: Monmi
  */
 
@@ -27,7 +27,7 @@ final class Monmi_Pay_Plugin {
     const OPTION_API_KEY     = 'monmi_pay_api_key';
     const OPTION_SECRET      = 'monmi_pay_secret_key';
     const OPTION_ENVIRONMENT = 'monmi_pay_environment';
-    const VERSION            = '0.1.22';
+    const VERSION            = '0.1.23';
     private const DEBUG_TRANSIENT_KEY = 'monmi_pay_last_request_snapshot';
 
     /** @var Monmi_Pay_Plugin|null */
