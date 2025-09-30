@@ -1,6 +1,6 @@
 {
   "name": "monmi-pay",
-  "version": "0.1.23",
+  "version": "0.1.24",
   "description": "Monmi Pay WooCommerce plugin",
   "private": true,
   "scripts": {

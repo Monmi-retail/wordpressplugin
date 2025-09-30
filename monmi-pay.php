@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Monmi Pay
  * Description: Provides a Monmi Pay payment gateway and settings for WooCommerce.
- * Version: 0.1.23
+ * Version: 0.1.24
  * Author: Monmi
  */
 
@@ -27,7 +27,7 @@ final class Monmi_Pay_Plugin {
     const OPTION_API_KEY     = 'monmi_pay_api_key';
     const OPTION_SECRET      = 'monmi_pay_secret_key';
     const OPTION_ENVIRONMENT = 'monmi_pay_environment';
-    const VERSION            = '0.1.23';
+    const VERSION            = '0.1.24';
     private const DEBUG_TRANSIENT_KEY = 'monmi_pay_last_request_snapshot';
 
     /** @var Monmi_Pay_Plugin|null */
@@ -184,7 +184,21 @@ final class Monmi_Pay_Plugin {
 
         if ( class_exists( 'Automattic\WooCommerce\Blocks\Payments\PaymentMethodRegistry' )
             && $payment_method_types instanceof Automattic\WooCommerce\Blocks\Payments\PaymentMethodRegistry ) {
-            if ( ! $payment_method_types->has( Monmi_Pay_Gateway::GATEWAY_ID ) ) {
+            $already_registered = false;
+
+            if ( method_exists( $payment_method_types, 'has' ) ) {
+                $already_registered = $payment_method_types->has( Monmi_Pay_Gateway::GATEWAY_ID );
+            } elseif ( method_exists( $payment_method_types, 'is_registered' ) ) {
+                $already_registered = $payment_method_types->is_registered( Monmi_Pay_Gateway::GATEWAY_ID );
+            } elseif ( method_exists( $payment_method_types, 'get_all_registered' ) ) {
+                $registered = $payment_method_types->get_all_registered();
+
+                if ( is_array( $registered ) ) {
+                    $already_registered = array_key_exists( Monmi_Pay_Gateway::GATEWAY_ID, $registered );
+                }
+            }
+
+            if ( ! $already_registered && method_exists( $payment_method_types, 'register' ) ) {
                 $payment_method_types->register( new Monmi_Pay_Blocks_Payment_Method( $this ) );
             }
 
